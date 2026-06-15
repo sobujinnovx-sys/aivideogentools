@@ -1,7 +1,7 @@
 import json
 import asyncio
-import subprocess
 import tempfile
+import struct
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,13 +38,14 @@ async def _run_generation(job_id: str):
 
             await _update_job(db, job, progress=0.6)
 
-            video_path = await _encode_video(frames, job)
+            video_path, thumb_path = await _encode_video(frames, job)
 
             await _update_job(db, job, progress=0.8)
 
             stored_path = await storage_service.save_video_from_path(video_path, job.id)
 
-            thumb_path = await _generate_thumbnail(video_path, job.id)
+            if not thumb_path:
+                thumb_path = await _generate_thumbnail_from_frame(frames[0], job.id)
 
             file_size = Path(video_path).stat().st_size
 
@@ -76,6 +77,8 @@ async def _run_generation(job_id: str):
                 os.remove(video_path)
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             await _update_job(
                 db, job,
                 status=JobStatus.FAILED,
@@ -97,14 +100,14 @@ async def _run_generation(job_id: str):
                 await db.commit()
 
 
-async def _generate_frames(job: Job, db: AsyncSession) -> list[str]:
+async def _generate_frames(job: Job, db: AsyncSession) -> list:
     """Generate video frames using the selected AI model."""
     frames_dir = tempfile.mkdtemp()
 
     model = job.model
     prompt = job.prompt
     duration = job.duration
-    fps = 24
+    fps = 12
     total_frames = duration * fps
 
     image_urls = json.loads(job.image_urls) if job.image_urls else []
@@ -121,127 +124,98 @@ async def _generate_frames(job: Job, db: AsyncSession) -> list[str]:
     return frames
 
 
-async def _run_wan21(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list[str]:
-    """Placeholder for Wan 2.1 model inference."""
+async def _run_wan21(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
+    """Placeholder for Wan 2.1 model inference — generates animated placeholder frames."""
+    from PIL import Image, ImageDraw, ImageFont
+    import math
+
     width, height = _get_dimensions(aspect)
+    # Use lower res for speed in placeholder mode
+    w, h = width // 2, height // 2
+    total_frames = min(total_frames, 60)
 
-    frame_paths = []
-    for i in range(min(total_frames, 48)):
-        frame_path = Path(output_dir) / f"frame_{i:04d}.png"
-        _create_placeholder_frame(frame_path, width, height, i, total_frames)
-        frame_paths.append(str(frame_path))
+    frames = []
+    for i in range(total_frames):
+        t = i / max(total_frames - 1, 1)
 
-    return frame_paths
+        # Animated gradient background
+        r = int(20 + 40 * math.sin(t * math.pi * 2))
+        g = int(30 + 80 * math.sin(t * math.pi * 2 + 1))
+        b = int(80 + 120 * math.sin(t * math.pi * 2 + 2))
 
-
-async def _run_ltx_video(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list[str]:
-    """Placeholder for LTX Video model inference."""
-    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
-
-
-async def _run_cogvideox(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list[str]:
-    """Placeholder for CogVideoX model inference."""
-    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
-
-
-def _create_placeholder_frame(path: Path, width: int, height: int, frame_idx: int, total: int):
-    """Create a placeholder frame for testing without GPU."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-
-        progress = frame_idx / max(total - 1, 1)
-        r = int(30 + progress * 50)
-        g = int(50 + progress * 100)
-        b = int(100 + progress * 155)
-
-        img = Image.new("RGB", (width, height), (r, g, b))
+        img = Image.new("RGB", (w, h), (r, g, b))
         draw = ImageDraw.Draw(img)
 
-        bar_width = int(width * 0.6)
-        bar_height = 20
-        bar_x = (width - bar_width) // 2
-        bar_y = height - 60
-        draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], outline="white", width=2)
-        fill_width = int(bar_width * progress)
-        draw.rectangle([bar_x, bar_y, bar_x + fill_width, bar_y + bar_height], fill="white")
+        # Animated circle
+        cx = int(w * (0.3 + 0.4 * math.sin(t * math.pi * 4)))
+        cy = int(h * (0.3 + 0.4 * math.cos(t * math.pi * 3)))
+        radius = int(min(w, h) * 0.15)
+        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill="white", outline="yellow", width=2)
 
-        text = f"Frame {frame_idx + 1}/{total}"
-        draw.text((width // 2 - 40, bar_y - 30), text, fill="white")
+        # Progress bar
+        bar_w = int(w * 0.6)
+        bar_h = 10
+        bar_x = (w - bar_w) // 2
+        bar_y = h - 30
+        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], outline="white")
+        draw.rectangle([bar_x, bar_y, bar_x + int(bar_w * t), bar_y + bar_h], fill="white")
 
-        img.save(str(path))
-    except ImportError:
-        import struct
-        bmp_data = b""
-        row_size = (width * 3 + 3) & ~3
-        for y in range(height):
-            for x in range(width):
-                bmp_data += struct.pack("BBB", 50, 100, 200)
-            bmp_data += b"\x00" * (row_size - width * 3)
+        # Text
+        draw.text((w // 2 - 30, bar_y - 20), f"Frame {i+1}/{total_frames}", fill="white")
+        draw.text((10, 10), f"Prompt: {prompt[:40]}...", fill="white")
 
-        with open(str(path), "wb") as f:
-            f.write(bmp_data)
+        frames.append(img)
+
+    return frames
 
 
-async def _encode_video(frame_paths: list[str], job: Job) -> str:
-    """Encode frames to MP4 using FFmpeg."""
-    output_path = tempfile.mktemp(suffix=".mp4")
+async def _run_ltx_video(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
+    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
 
-    fps = 24
-    width, height = _get_dimensions(job.aspect_ratio)
 
-    input_pattern = str(Path(frame_paths[0]).parent / "frame_%04d.png")
+async def _run_cogvideox(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
+    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
 
-    cmd = [
-        "ffmpeg", "-y",
-        "-framerate", str(fps),
-        "-i", input_pattern,
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",
-        "-c:v", "libx264",
-        "-preset", "medium",
-        "-crf", "23",
-        "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
+
+async def _encode_video(frames: list, job: Job) -> tuple[str, str]:
+    """Encode frames to GIF (no FFmpeg needed) and generate thumbnail."""
+    output_path = tempfile.mktemp(suffix=".gif")
+    thumb_path = ""
+
+    # Save as animated GIF
+    duration_ms = int(1000 / 12)  # 12 fps
+    frames[0].save(
         output_path,
-    ]
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=True,
     )
-    stdout, stderr = await process.communicate()
 
-    if process.returncode != 0:
-        raise RuntimeError(f"FFmpeg failed: {stderr.decode()}")
+    # Generate thumbnail from middle frame
+    mid_idx = len(frames) // 2
+    thumb_img = frames[mid_idx].copy()
+    thumb_img.thumbnail((320, 320))
+    thumb_bytes = tempfile.mktemp(suffix=".jpg")
+    thumb_img.save(thumb_bytes, "JPEG", quality=80)
+    with open(thumb_bytes, "rb") as f:
+        thumb_content = f.read()
+    thumb_path = await storage_service.save_thumbnail(thumb_content, job.id)
+    import os
+    os.remove(thumb_bytes)
 
-    return output_path
+    return output_path, thumb_path
 
 
-async def _generate_thumbnail(video_path: str, job_id: str) -> str:
-    """Extract a thumbnail from the video."""
-    thumb_path = tempfile.mktemp(suffix=".jpg")
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-i", video_path,
-        "-vf", "thumbnail,scale=320:-1",
-        "-frames:v", "1",
-        thumb_path,
-    ]
-
-    process = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await process.communicate()
-
-    if process.returncode == 0 and Path(thumb_path).exists():
-        with open(thumb_path, "rb") as f:
-            content = f.read()
-        return await storage_service.save_thumbnail(content, job_id)
-
-    return ""
+async def _generate_thumbnail_from_frame(frame, job_id: str) -> str:
+    """Generate thumbnail from a PIL Image frame."""
+    thumb = frame.copy()
+    thumb.thumbnail((320, 320))
+    import io
+    buf = io.BytesIO()
+    thumb.save(buf, "JPEG", quality=80)
+    return await storage_service.save_thumbnail(buf.getvalue(), job_id)
 
 
 def _get_dimensions(aspect: str) -> tuple[int, int]:

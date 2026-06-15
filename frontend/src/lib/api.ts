@@ -61,6 +61,18 @@ export const getVideos = (page = 1, limit = 20) =>
 
 export const deleteVideo = (id: string) => api.delete(`/videos/${id}`);
 
+export const downloadVideo = async (id: string) => {
+  const res = await api.get(`/videos/${id}/download`, { responseType: "blob" });
+  const url = window.URL.createObjectURL(new Blob([res.data]));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `video_${id}.gif`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.URL.revokeObjectURL(url);
+};
+
 // Jobs
 export const getJob = (id: string) => api.get(`/jobs/${id}`);
 

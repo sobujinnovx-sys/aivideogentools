@@ -3,7 +3,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { generateVideo, uploadImage, getJob } from "@/lib/api";
+import { generateVideo, uploadImage, getJob, downloadVideo } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { Upload, X, Loader2, Download, Play, CheckCircle, AlertCircle } from "lucide-react";
 
@@ -305,13 +305,13 @@ export default function GeneratePage() {
                     <div className="bg-gray-900 rounded-lg aspect-video flex items-center justify-center">
                       <Play className="w-12 h-12 text-white opacity-50" />
                     </div>
-                    <a
-                      href={`/api/videos/?job_id=${jobData.id}`}
-                      className="flex items-center justify-center gap-2 bg-green-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-700 transition"
+                    <button
+                      onClick={() => downloadVideo(jobData.id)}
+                      className="w-full flex items-center justify-center gap-2 bg-green-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-green-700 transition"
                     >
                       <Download className="w-4 h-4" />
-                      Download MP4
-                    </a>
+                      Download Video
+                    </button>
                   </div>
                 )}
               </div>

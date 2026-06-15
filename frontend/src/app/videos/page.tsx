@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { getVideos, deleteVideo } from "@/lib/api";
+import { getVideos, deleteVideo, downloadVideo } from "@/lib/api";
 import { useAuthStore } from "@/lib/store";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -95,14 +95,13 @@ export default function VideosPage() {
                     <span>{video.model_used}</span>
                   </div>
                   <div className="flex gap-2">
-                    <a
-                      href={video.file_path}
-                      download
+                    <button
+                      onClick={() => downloadVideo(video.id)}
                       className="flex-1 flex items-center justify-center gap-1 bg-blue-600 text-white py-2 rounded-lg text-sm hover:bg-blue-700 transition"
                     >
                       <Download className="w-4 h-4" />
                       Download
-                    </a>
+                    </button>
                     <button
                       onClick={() => deleteMutation.mutate(video.id)}
                       className="p-2 text-gray-400 hover:text-red-500 border rounded-lg"

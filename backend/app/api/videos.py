@@ -2,6 +2,7 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -120,6 +121,29 @@ async def delete_video(
 
     await db.delete(video)
     return {"message": "Video deleted"}
+
+
+@router.get("/{video_id}/download")
+async def download_video(
+    video_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    # Try lookup by video ID first, then by job ID
+    result = await db.execute(select(Video).where(Video.id == video_id, Video.user_id == user.id))
+    video = result.scalar_one_or_none()
+    if not video:
+        result = await db.execute(select(Video).where(Video.job_id == video_id, Video.user_id == user.id))
+        video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    full_path = storage_service.get_full_path(video.file_path)
+    return FileResponse(
+        full_path,
+        media_type="image/gif",
+        filename=f"video_{video.id}.gif",
+    )
 
 
 def _job_to_response(job: Job) -> JobResponse:
