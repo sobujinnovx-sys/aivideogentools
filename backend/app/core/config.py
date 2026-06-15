@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     CREDITS_15S: int = 30
 
     DEFAULT_MODEL: str = "wan2.1"
+    REPLICATE_API_TOKEN: str = ""
 
     class Config:
         env_file = ".env"

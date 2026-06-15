@@ -16,3 +16,4 @@ Pillow==11.1.0
 httpx==0.28.1
 email-validator
 aiofiles
+replicate

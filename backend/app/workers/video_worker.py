@@ -1,7 +1,7 @@
 import json
 import asyncio
 import tempfile
-import struct
+import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +15,13 @@ from app.models.video import Video
 from app.models.credit import CreditTransaction, TransactionType
 from app.models.user import User
 from app.services.storage import storage_service
+
+
+REPLICATE_MODELS = {
+    "wan2.1": "tencent/hunyuan-video",
+    "ltx-video": "stability-ai/stable-video-diffusion",
+    "cogvideox": "minimax/video-01",
+}
 
 
 async def _update_job(db: AsyncSession, job: Job, **kwargs):
@@ -33,23 +40,21 @@ async def _run_generation(job_id: str):
         await _update_job(db, job, status=JobStatus.PROCESSING, started_at=datetime.now(timezone.utc), progress=0.1)
 
         try:
-            model_name = job.model
-            frames = await _generate_frames(job, db)
+            await _update_job(db, job, progress=0.2)
 
-            await _update_job(db, job, progress=0.6)
+            video_url = await _run_replicate(job)
 
-            video_path, thumb_path = await _encode_video(frames, job)
+            await _update_job(db, job, progress=0.7)
 
-            await _update_job(db, job, progress=0.8)
+            video_path = await _download_video(video_url, job.id)
+
+            await _update_job(db, job, progress=0.85)
 
             stored_path = await storage_service.save_video_from_path(video_path, job.id)
 
-            if not thumb_path:
-                thumb_path = await _generate_thumbnail_from_frame(frames[0], job.id)
+            thumb_path = await _extract_thumbnail(video_path, job.id)
 
             file_size = Path(video_path).stat().st_size
-
-            resolution = _get_resolution(job.aspect_ratio)
 
             video = Video(
                 user_id=job.user_id,
@@ -57,20 +62,15 @@ async def _run_generation(job_id: str):
                 prompt=job.prompt,
                 duration=job.duration,
                 aspect_ratio=job.aspect_ratio,
-                model_used=model_name,
+                model_used=job.model,
                 file_path=stored_path,
                 thumbnail_path=thumb_path,
                 file_size=file_size,
-                resolution=resolution,
+                resolution=_get_resolution(job.aspect_ratio),
             )
             db.add(video)
 
-            await _update_job(
-                db, job,
-                status=JobStatus.COMPLETED,
-                progress=1.0,
-                completed_at=datetime.now(timezone.utc),
-            )
+            await _update_job(db, job, status=JobStatus.COMPLETED, progress=1.0, completed_at=datetime.now(timezone.utc))
 
             import os
             if os.path.exists(video_path):
@@ -79,12 +79,7 @@ async def _run_generation(job_id: str):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            await _update_job(
-                db, job,
-                status=JobStatus.FAILED,
-                error_message=str(e),
-                completed_at=datetime.now(timezone.utc),
-            )
+            await _update_job(db, job, status=JobStatus.FAILED, error_message=str(e), completed_at=datetime.now(timezone.utc))
 
             user = await db.execute(select(User).where(User.id == job.user_id))
             user_obj = user.scalar_one_or_none()
@@ -100,122 +95,82 @@ async def _run_generation(job_id: str):
                 await db.commit()
 
 
-async def _generate_frames(job: Job, db: AsyncSession) -> list:
-    """Generate video frames using the selected AI model."""
-    frames_dir = tempfile.mkdtemp()
+async def _run_replicate(job: Job) -> str:
+    """Call Replicate API to generate video."""
+    import replicate
 
-    model = job.model
-    prompt = job.prompt
-    duration = job.duration
-    fps = 12
-    total_frames = duration * fps
+    model_name = REPLICATE_MODELS.get(job.model, REPLICATE_MODELS["wan2.1"])
+
+    aspect_w, aspect_h = _get_dimensions(job.aspect_ratio)
+    if aspect_h > aspect_w:
+        aspect = "9:16"
+    elif aspect_w > aspect_h:
+        aspect = "16:9"
+    else:
+        aspect = "1:1"
 
     image_urls = json.loads(job.image_urls) if job.image_urls else []
 
-    if model == "wan2.1":
-        frames = await _run_wan21(prompt, total_frames, image_urls, frames_dir, job.aspect_ratio)
-    elif model == "ltx-video":
-        frames = await _run_ltx_video(prompt, total_frames, image_urls, frames_dir, job.aspect_ratio)
-    elif model == "cogvideox":
-        frames = await _run_cogvideox(prompt, total_frames, image_urls, frames_dir, job.aspect_ratio)
-    else:
-        frames = await _run_wan21(prompt, total_frames, image_urls, frames_dir, job.aspect_ratio)
+    input_params = {
+        "prompt": job.prompt,
+        "num_frames": job.duration * 8,
+        "aspect_ratio": aspect,
+    }
 
-    return frames
+    if image_urls:
+        input_params["image"] = image_urls[0]
 
-
-async def _run_wan21(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
-    """Placeholder for Wan 2.1 model inference — generates animated placeholder frames."""
-    from PIL import Image, ImageDraw, ImageFont
-    import math
-
-    width, height = _get_dimensions(aspect)
-    # Use lower res for speed in placeholder mode
-    w, h = width // 2, height // 2
-    total_frames = min(total_frames, 60)
-
-    frames = []
-    for i in range(total_frames):
-        t = i / max(total_frames - 1, 1)
-
-        # Animated gradient background
-        r = int(20 + 40 * math.sin(t * math.pi * 2))
-        g = int(30 + 80 * math.sin(t * math.pi * 2 + 1))
-        b = int(80 + 120 * math.sin(t * math.pi * 2 + 2))
-
-        img = Image.new("RGB", (w, h), (r, g, b))
-        draw = ImageDraw.Draw(img)
-
-        # Animated circle
-        cx = int(w * (0.3 + 0.4 * math.sin(t * math.pi * 4)))
-        cy = int(h * (0.3 + 0.4 * math.cos(t * math.pi * 3)))
-        radius = int(min(w, h) * 0.15)
-        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill="white", outline="yellow", width=2)
-
-        # Progress bar
-        bar_w = int(w * 0.6)
-        bar_h = 10
-        bar_x = (w - bar_w) // 2
-        bar_y = h - 30
-        draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], outline="white")
-        draw.rectangle([bar_x, bar_y, bar_x + int(bar_w * t), bar_y + bar_h], fill="white")
-
-        # Text
-        draw.text((w // 2 - 30, bar_y - 20), f"Frame {i+1}/{total_frames}", fill="white")
-        draw.text((10, 10), f"Prompt: {prompt[:40]}...", fill="white")
-
-        frames.append(img)
-
-    return frames
-
-
-async def _run_ltx_video(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
-    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
-
-
-async def _run_cogvideox(prompt: str, total_frames: int, images: list, output_dir: str, aspect: str) -> list:
-    return await _run_wan21(prompt, total_frames, images, output_dir, aspect)
-
-
-async def _encode_video(frames: list, job: Job) -> tuple[str, str]:
-    """Encode frames to GIF (no FFmpeg needed) and generate thumbnail."""
-    output_path = tempfile.mktemp(suffix=".gif")
-    thumb_path = ""
-
-    # Save as animated GIF
-    duration_ms = int(1000 / 12)  # 12 fps
-    frames[0].save(
-        output_path,
-        save_all=True,
-        append_images=frames[1:],
-        duration=duration_ms,
-        loop=0,
-        optimize=True,
+    output = await asyncio.to_thread(
+        replicate.run,
+        model_name,
+        input=input_params,
     )
 
-    # Generate thumbnail from middle frame
-    mid_idx = len(frames) // 2
-    thumb_img = frames[mid_idx].copy()
-    thumb_img.thumbnail((320, 320))
-    thumb_bytes = tempfile.mktemp(suffix=".jpg")
-    thumb_img.save(thumb_bytes, "JPEG", quality=80)
-    with open(thumb_bytes, "rb") as f:
-        thumb_content = f.read()
-    thumb_path = await storage_service.save_thumbnail(thumb_content, job.id)
-    import os
-    os.remove(thumb_bytes)
-
-    return output_path, thumb_path
+    if isinstance(output, str):
+        return output
+    elif hasattr(output, "url"):
+        return output.url
+    elif isinstance(output, list) and output:
+        url = output[0]
+        return url.url if hasattr(url, "url") else str(url)
+    else:
+        raise RuntimeError(f"Unexpected Replicate output: {output}")
 
 
-async def _generate_thumbnail_from_frame(frame, job_id: str) -> str:
-    """Generate thumbnail from a PIL Image frame."""
-    thumb = frame.copy()
-    thumb.thumbnail((320, 320))
-    import io
-    buf = io.BytesIO()
-    thumb.save(buf, "JPEG", quality=80)
-    return await storage_service.save_thumbnail(buf.getvalue(), job_id)
+async def _download_video(url: str, job_id: str) -> str:
+    """Download video from URL to temp file."""
+    output_path = tempfile.mktemp(suffix=".mp4")
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=300) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+
+        with open(output_path, "wb") as f:
+            f.write(response.content)
+
+    return output_path
+
+
+async def _extract_thumbnail(video_path: str, job_id: str) -> str:
+    """Try to extract thumbnail with ffmpeg, fall back to placeholder."""
+    try:
+        import subprocess
+        thumb_path = tempfile.mktemp(suffix=".jpg")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-vf", "thumbnail,scale=320:-1", "-frames:v", "1", thumb_path],
+            capture_output=True, timeout=10,
+        )
+        if result.returncode == 0 and Path(thumb_path).exists():
+            with open(thumb_path, "rb") as f:
+                content = f.read()
+            path = await storage_service.save_thumbnail(content, job_id)
+            import os
+            os.remove(thumb_path)
+            return path
+    except Exception:
+        pass
+
+    return ""
 
 
 def _get_dimensions(aspect: str) -> tuple[int, int]:
@@ -232,7 +187,7 @@ def _get_resolution(aspect: str) -> str:
 
 
 def process_video_job(job_id: str):
-    """RQ entry point — runs the async pipeline in a sync context."""
+    """RQ entry point."""
     loop = asyncio.new_event_loop()
     try:
         loop.run_until_complete(_run_generation(job_id))
